@@ -4,6 +4,7 @@ import {
   Heart,
   ImagePlus,
   MessageCircle,
+  Mic,
   Plus,
   RotateCcw,
   Send,
@@ -11,7 +12,8 @@ import {
   Trash2,
   Users,
   X,
-} from 'lucide-react';
+}from 'lucide-react';
+
 import { useEffect, useMemo, useRef, useState, type FormEvent } from 'react';
 import { useApp } from '../app/AppContext';
 import { InterfaceError, message, type MessageKey } from '../i18n/catalog';
@@ -57,12 +59,16 @@ type NetworkTab = 'wall' | 'match' | 'agent';
 export function NetworkScreen({
   onNewAlert,
   onOpenCommunity,
+  onOpenVoice,
+  initialTab = 'wall',
 }: {
   onNewAlert: () => void;
   onOpenCommunity: () => void;
+  onOpenVoice: () => void;
+  initialTab?: NetworkTab;
 }) {
   const { t } = useTranslation();
-  const [tab, setTab] = useState<NetworkTab>('wall');
+  const [tab, setTab] = useState<NetworkTab>(initialTab);
   const [state, setState] = useState<SocialState>(() => loadSocialState());
   const { showToast } = useApp();
   const warnedRef = useRef(false);
@@ -172,7 +178,7 @@ export function NetworkScreen({
 
       {tab === 'wall' ? <WallView state={state} setState={setState} /> : null}
       {tab === 'match' ? <MatchView state={state} setState={setState} /> : null}
-      {tab === 'agent' ? <AgentView onAction={runAction} /> : null}
+      {tab === 'agent' ? <AgentView onAction={runAction} onOpenVoice={onOpenVoice} /> : null}
     </div>
   );
 }
@@ -686,7 +692,13 @@ const ACTION_LABEL: Partial<Record<AssistantAction, MessageKey>> = {
   match: 'network.action.irAMatch',
 };
 
-function AgentView({ onAction }: { onAction: (action?: AssistantAction) => void }) {
+function AgentView({
+  onAction,
+  onOpenVoice,
+}: {
+  onAction: (action?: AssistantAction) => void;
+  onOpenVoice: () => void;
+}) {
   const { t } = useTranslation();
   const [messages, setMessages] = useState<AgentMessage[]>([
     {
@@ -717,6 +729,15 @@ function AgentView({ onAction }: { onAction: (action?: AssistantAction) => void 
 
   return (
     <section aria-label={t('network.asistente')}>
+      <button
+        type="button"
+        className="btn btn-primary"
+        data-testid="net-open-voice"
+        onClick={onOpenVoice}
+      >
+        <Mic size={18} />
+        {t('network.hablarConManguare')}
+      </button>
       <p className="field-help">
         {t('network.asistenteLocalConReglasNoUn')}
       </p>

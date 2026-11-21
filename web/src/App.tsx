@@ -2,7 +2,7 @@
 
 import { message } from './i18n/catalog';
 import { useTranslation } from './i18n/LanguageContext';
-import { lazy, Suspense, useState } from 'react';
+import { lazy, Suspense, useCallback, useRef, useState } from 'react';
 import { AppProvider, useApp } from './app/AppContext';
 import { SessionProvider, useSession } from './app/SessionContext';
 import { BottomNav, type Tab } from './components/BottomNav';
@@ -25,6 +25,17 @@ import { NewAlertScreen } from './screens/NewAlertScreen';
 import { RegisterScreen } from './screens/RegisterScreen';
 import { SettingsScreen } from './screens/SettingsScreen';
 import { isEffectivelyOnline } from './lib/sync';
+import { VoiceAssistant } from './components/VoiceAssistant';
+import { getCurrentLocation } from './lib/geography';
+import type { CommunityVoiceController } from './lib/voice-tools';
+import {
+  isExplicitPublicationConfirmation,
+  summarizeVoiceListing,
+  validateVoiceListing,
+  voiceListingFieldSchema,
+  type ListingFormPatch,
+  type VoiceToolContext,
+} from './lib/voice-tools';
 
 const MapScreen = lazy(() =>
   import('./screens/MapScreen').then((module) => ({ default: module.MapScreen })),
@@ -33,7 +44,7 @@ const MapScreen = lazy(() =>
 type Screen =
   | { name: 'home' }
   | { name: 'community' }
-  | { name: 'network' }
+  | { name: 'network'; initialTab?: 'wall' | 'match' | 'agent' }
   | { name: 'map' }
   | { name: 'biodiversity'; category?: BiodiversityCategory }
   | { name: 'history' }
@@ -50,7 +61,287 @@ function AppShell() {
   const [sosSending, setSosSending] = useState(false);
   const { createAlert, alerts, settings, showToast } = useApp();
   const { session } = useSession();
+  const [voiceOpen, setVoiceOpen] = useState(false);
+  const screenRef = useRef(screen);
+  screenRef.current = screen;
+  const alertsRef = useRef(alerts);
+  alertsRef.current = alerts;
+  const communityVoiceControllerRef = useRef<CommunityVoiceController | null>(null);
+  const pendingPublicationRef = useRef<{
+    id: string;
+    snapshot: string;
+  } | null>(null);
 
+  const openVoice = () => setVoiceOpen(true);
+  const closeVoice = () => {
+    pendingPublicationRef.current = null;
+    setVoiceOpen(false);
+  };
+
+  const registerCommunityVoiceController = useCallback(
+    (controller: CommunityVoiceController | null) => {
+      communityVoiceControllerRef.current = controller;
+    },
+    [],
+  );
+
+  const waitFor = async (
+    predicate: () => boolean,
+    description: string,
+    signal: AbortSignal,
+  ) => {
+    const deadline = Date.now() + 6000;
+    while (Date.now() < deadline) {
+      if (signal.aborted) throw new DOMException('La acción fue cancelada.', 'AbortError');
+      if (predicate()) return;
+      await new Promise((resolve) => window.setTimeout(resolve, 25));
+    }
+    throw new Error(`No se pudo verificar que ${description}.`);
+  };
+
+  const navigateAndVerify = async (
+    target: Screen,
+    expectedName: Screen['name'],
+    signal: AbortSignal,
+  ) => {
+    if (signal.aborted) throw new DOMException('La acción fue cancelada.', 'AbortError');
+    const previous = screenRef.current;
+    setScreen(target);
+    try {
+      await waitFor(
+        () => document.querySelector('[data-testid="app-screen"]')?.getAttribute('data-screen') === expectedName,
+        `se abriera ${expectedName}`,
+        signal,
+      );
+    } catch (error) {
+      if (signal.aborted) setScreen(previous);
+      throw error;
+    }
+  };
+
+  const requireListingForm = async (signal: AbortSignal) => {
+    await waitFor(
+      () => {
+        const input = document.querySelector('[data-testid="listing-title"]');
+        return Boolean(
+          communityVoiceControllerRef.current?.getListingForm() &&
+          input &&
+          (input as HTMLElement).getClientRects().length,
+        );
+      },
+      'estuviera abierto el formulario de publicación',
+      signal,
+    );
+    const controller = communityVoiceControllerRef.current?.getListingForm();
+    if (!controller) throw new Error('El formulario de publicación no está montado.');
+    return controller;
+  };
+
+  const handleVoiceToolCall = async (
+    name: string,
+    args: Record<string, unknown>,
+    context: VoiceToolContext,
+  ) => {
+    const { signal, lastUserUtterance } = context;
+    if (signal.aborted) throw new DOMException('La acción fue cancelada.', 'AbortError');
+
+    if (name === 'navigate_to_screen') {
+      const target = args.screen;
+      if (target === 'community') {
+        await navigateAndVerify({ name: 'community' }, 'community', signal);
+        communityVoiceControllerRef.current?.showHome();
+        return { success: true, screen: 'community', verified: true };
+      }
+      if (target === 'home' || target === 'map' || target === 'history' || target === 'settings' || target === 'new') {
+        await navigateAndVerify({ name: target }, target, signal);
+        return { success: true, screen: target, verified: true };
+      }
+      if (target === 'network') {
+        const validTabs = ['wall', 'match', 'agent'] as const;
+        const tab = validTabs.find((item) => item === args.tab);
+        await navigateAndVerify(
+          { name: 'network', ...(tab ? { initialTab: tab } : {}) },
+          'network',
+          signal,
+        );
+        return { success: true, screen: 'network', tab: tab ?? 'wall', verified: true };
+      }
+      if (target === 'biodiversity') {
+        await navigateAndVerify({ name: 'biodiversity' }, 'biodiversity', signal);
+        return { success: true, screen: target, verified: true };
+      }
+      if (target === 'alert') {
+        const alertId = args.alertId;
+        if (typeof alertId !== 'string' || !alertsRef.current.some((item) => item.id === alertId)) {
+          return { success: false, message: 'No se encontró esa alerta.' };
+        }
+        await navigateAndVerify({ name: 'alert', id: alertId }, 'alert', signal);
+        return { success: true, screen: 'alert', alertId, verified: true };
+      }
+      return { success: false, message: 'No reconozco esa pantalla de Manguaré.' };
+    }
+
+    if (name === 'open_listing_form') {
+      await navigateAndVerify({ name: 'community' }, 'community', signal);
+      const controller = communityVoiceControllerRef.current;
+      if (!controller) throw new Error('No se pudo conectar con la pantalla Comunidad.');
+      controller.openListingForm();
+      await waitFor(
+        () => {
+          const input = document.querySelector('[data-testid="listing-title"]');
+          return Boolean(input && (input as HTMLElement).getClientRects().length);
+        },
+        'se abriera el formulario de publicación',
+        signal,
+      );
+      await requireListingForm(signal);
+      return {
+        success: true,
+        screen: 'community',
+        form: 'listing',
+        verified: true,
+      };
+    }
+
+    if (name === 'get_listing_form_schema') {
+      await requireListingForm(signal);
+      return { success: true, fields: voiceListingFieldSchema() };
+    }
+
+    if (name === 'get_listing_form_values') {
+      const form = await requireListingForm(signal);
+      const values = form.getValues();
+      const validation = validateVoiceListing(values);
+      return {
+        success: true,
+        values,
+        missingRequiredFields: validation.missing,
+        photoAttached: values.photoAttached ?? false,
+      };
+    }
+
+    if (name === 'update_listing_form_fields') {
+      const form = await requireListingForm(signal);
+      const patch: ListingFormPatch = {};
+      for (const field of ['title', 'category', 'price', 'location', 'description'] as const) {
+        if (Object.prototype.hasOwnProperty.call(args, field)) {
+          if (typeof args[field] !== 'string') {
+            return { success: false, message: `El campo ${field} debe ser texto.` };
+          }
+          patch[field] = args[field];
+        }
+      }
+      if (Object.keys(patch).length === 0) {
+        return { success: false, message: 'No se recibió ningún campo válido para actualizar.' };
+      }
+      return form.updateFields(patch);
+    }
+
+    if (name === 'validate_listing_form') {
+      const form = await requireListingForm(signal);
+      const values = form.getValues();
+      const validation = form.validateForVoice();
+      return {
+        success: validation.valid,
+        valid: validation.valid,
+        missingRequiredFields: validation.missing,
+        values,
+      };
+    }
+
+    if (name === 'use_current_location') {
+      const form = await requireListingForm(signal);
+      const location = await getCurrentLocation();
+      if (signal.aborted) throw new DOMException('La acción fue cancelada.', 'AbortError');
+      const label = `GPS: ${location.lat}, ${location.lng}`;
+      const update = form.updateFields({ location: label });
+      if (!update.success) return update;
+      form.setCoordinates({
+        lat: location.lat,
+        lng: location.lng,
+        accuracy: location.accuracy,
+      });
+      return {
+        success: true,
+        message: 'Se obtuvo y guardó la ubicación GPS real.',
+        location: label,
+        coordinates: {
+          lat: location.lat,
+          lng: location.lng,
+          accuracy: location.accuracy,
+        },
+      };
+    }
+
+    if (name === 'request_listing_publication_confirmation') {
+      const form = await requireListingForm(signal);
+      const values = form.getValues();
+      const validation = form.validateForVoice();
+      if (!validation.valid) {
+        pendingPublicationRef.current = null;
+        return {
+          success: false,
+          message: 'Completa los campos faltantes antes de preparar la confirmación.',
+          missingRequiredFields: validation.missing,
+        };
+      }
+      const id = globalThis.crypto?.randomUUID?.() ?? `publish-${Date.now()}-${Math.random()}`;
+      pendingPublicationRef.current = { id, snapshot: form.getPublicationSnapshot() };
+      return {
+        success: true,
+        confirmationId: id,
+        summary: summarizeVoiceListing(values),
+        requiresExplicitVerbalConfirmation: true,
+        message: 'Lee el resumen y pregunta si autoriza publicar. Aún no se ha publicado.',
+      };
+    }
+
+    if (name === 'publish_listing') {
+      const pending = pendingPublicationRef.current;
+      if (!pending || args.confirmationId !== pending.id) {
+        return {
+          success: false,
+          message: 'No hay una confirmación vigente. Prepara y lee un nuevo resumen primero.',
+        };
+      }
+      if (!isExplicitPublicationConfirmation(lastUserUtterance)) {
+        return {
+          success: false,
+          message: 'No se detectó una autorización verbal explícita del usuario; no se publicó.',
+        };
+      }
+      const form = await requireListingForm(signal);
+      if (form.getPublicationSnapshot() !== pending.snapshot) {
+        pendingPublicationRef.current = null;
+        return {
+          success: false,
+          message: 'El formulario cambió después del resumen. Valídalo y solicita confirmación nuevamente.',
+        };
+      }
+      const validation = form.validateForVoice();
+      if (!validation.valid) {
+        pendingPublicationRef.current = null;
+        return {
+          success: false,
+          message: 'El formulario ya no está completo; no se publicó.',
+          missingRequiredFields: validation.missing,
+        };
+      }
+      const result = form.publish();
+      if (result.success) pendingPublicationRef.current = null;
+      return result;
+    }
+
+    if (name === 'cancel_listing_publication') {
+      pendingPublicationRef.current = null;
+      return { success: true, message: 'La publicación no se realizó.' };
+    }
+
+    return {
+      success: false,
+      message: `Herramienta no disponible: ${name}.`,
+    };
+  };
   const goHome = () => setScreen({ name: 'home' });
   const goCommunity = () => setScreen({ name: 'community' });
   const goHistory = () => setScreen({ name: 'history' });
@@ -62,6 +353,7 @@ function AppShell() {
     else if (tab === 'history') setScreen({ name: 'history' });
     else setScreen({ name: 'settings' });
   };
+
 
   const activeTab: Tab | null =
     screen.name === 'home'
@@ -85,12 +377,13 @@ function AppShell() {
       <div className={`app-shell ${screen.name === 'new' ? 'is-wizard' : ''}`}>
         {screen.name === 'home' ? <TopBar onLanguage={() => setLanguageOpen(true)} /> : null}
 
-        <main className="app-main">
+        <main className="app-main" data-testid="app-screen" data-screen={screen.name}>
           {screen.name === 'home' ? (
             <HomeScreen
               onOpenAlert={(id) => setScreen({ name: 'alert', id })}
               onHistory={goHistory}
               onCommunity={() => setScreen({ name: 'community' })}
+              onOpenAssistant={() => setScreen({ name: 'network', initialTab: 'agent' })}
               onSOS={() => setSosConfirmOpen(true)}
               onOpenLanguage={() => setLanguageOpen(true)}
               onOpenHelp={() => setHelpOpen(true)}
@@ -102,6 +395,8 @@ function AppShell() {
               onReportBiodiversity={(category) =>
                 setScreen({ name: 'biodiversity', category })
               }
+              onOpenVoice={openVoice}
+              onVoiceControllerReady={registerCommunityVoiceController}
             />
           ) : null}
 
@@ -109,6 +404,8 @@ function AppShell() {
             <NetworkScreen
               onNewAlert={() => setScreen({ name: 'new' })}
               onOpenCommunity={goCommunity}
+              onOpenVoice={openVoice}
+              initialTab={screen.initialTab}
             />
           ) : null}
 
@@ -151,6 +448,12 @@ function AppShell() {
             />
           ) : null}
         </main>
+        {voiceOpen && (
+          <VoiceAssistant
+            onClose={closeVoice}
+            onToolCall={handleVoiceToolCall}
+          />
+        )}
 
         {screen.name !== 'new' ? (
           <BottomNav

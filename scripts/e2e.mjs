@@ -150,9 +150,27 @@ async function checkLanguages(app) {
   assert.equal(await greeting.evaluate((label) => label.textContent), 'Kametsa pimpoke, Juan');
   const ashaninkaSos = await app.waitForSelector('[data-testid="sos-button"] [lang="cni"]');
   assert.equal(await ashaninkaSos.evaluate((label) => label.textContent), 'Shintsipaite yabintete');
-  assert.ok(await ashaninkaSos.evaluate((label) =>
-    label.scrollWidth <= label.clientWidth && label.clientWidth < label.closest('button').clientWidth),
-    'el título del SOS en asháninka debe caber dentro del botón');
+  const sosMetrics = await ashaninkaSos.evaluate((label) => {
+  const button = label.closest('button');
+  const style = getComputedStyle(label);
+  return {
+    text: label.textContent,
+    scrollWidth: label.scrollWidth,
+    clientWidth: label.clientWidth,
+    buttonWidth: button.clientWidth,
+    fontSize: style.fontSize,
+    letterSpacing: style.letterSpacing,
+    whiteSpace: style.whiteSpace,
+    display: style.display,
+    viewport: { width: innerWidth, height: innerHeight },
+  };
+});
+console.log('ASHANINKA SOS:', JSON.stringify(sosMetrics));
+assert.ok(
+  sosMetrics.scrollWidth <= sosMetrics.clientWidth &&
+  sosMetrics.clientWidth < sosMetrics.buttonWidth,
+  'el título del SOS en asháninka debe caber dentro del botón',
+);
   assert.equal(await app.$eval('.quick-title [lang="cni"]', (label) => label.textContent), 'Amitakotantsi');
   assert.equal(await app.$eval('[data-testid="nav-community"] [lang="cni"]', (label) => label.textContent), 'Nampitsi');
   if (visualBeta) {
@@ -584,6 +602,239 @@ async function main() {
       { timeout: 10000 },
     );
     results.networkWallMatchAgentMarket = true;
+
+    // 8c. Gemini Live usa herramientas reales; se simula el transporte para probar
+    // la integración React sin requerir credenciales externas en CI.
+    await app.browserContext().overridePermissions(base, ['microphone', 'geolocation']);
+    await app.setGeolocation({ latitude: -5.15, longitude: -78.29 });
+    await app.evaluate(() => {
+      const nativeFetch = window.fetch.bind(window);
+      window.fetch = (input, init) => {
+        if (String(input).includes('/api/gemini/token')) {
+          return Promise.resolve(new Response(JSON.stringify({
+            token: 'test-ephemeral-token',
+            model: 'gemini-3.8-live',
+          }), { status: 200, headers: { 'Content-Type': 'application/json' } }));
+        }
+        return nativeFetch(input, init);
+      };
+
+      class FakeNode {
+        connect() { return this; }
+        disconnect() {}
+      }
+      class FakeAudioContext {
+        state = 'running';
+        sampleRate = 48000;
+        currentTime = 0;
+        destination = new FakeNode();
+        async resume() {}
+        async close() { this.state = 'closed'; }
+        createMediaStreamSource() { return new FakeNode(); }
+        createScriptProcessor() { return Object.assign(new FakeNode(), { onaudioprocess: null }); }
+        createGain() { return Object.assign(new FakeNode(), { gain: { value: 1 } }); }
+        createBuffer(_channels, length) {
+          return { duration: length / 24000, getChannelData: () => new Float32Array(length) };
+        }
+        createBufferSource() {
+          return Object.assign(new FakeNode(), {
+            buffer: null,
+            onended: null,
+            start() {},
+            stop() { this.onended?.(); },
+          });
+        }
+      }
+      Object.defineProperty(window, 'AudioContext', { configurable: true, value: FakeAudioContext });
+      let stoppedTracks = 0;
+      Object.defineProperty(navigator, 'mediaDevices', {
+        configurable: true,
+        value: {
+          getUserMedia: async () => ({
+            getTracks: () => [{ stop: () => { stoppedTracks += 1; } }],
+          }),
+        },
+      });
+
+      class FakeWebSocket {
+        static OPEN = 1;
+        static CONNECTING = 0;
+        readyState = FakeWebSocket.CONNECTING;
+        onopen = null;
+        onmessage = null;
+        onerror = null;
+        onclose = null;
+        constructor() {
+          window.__geminiMock.socket = this;
+          window.setTimeout(() => {
+            this.readyState = FakeWebSocket.OPEN;
+            this.onopen?.({});
+          }, 0);
+        }
+        send(raw) {
+          const message = JSON.parse(raw);
+          if (message.setup) {
+            window.__geminiMock.setup = message.setup;
+            window.setTimeout(() => this.onmessage?.({ data: JSON.stringify({ setupComplete: true }) }), 0);
+          }
+          if (message.toolResponse) {
+            window.__geminiMock.responses.push(...message.toolResponse.functionResponses);
+          }
+        }
+        close() { this.readyState = 3; }
+      }
+      Object.defineProperty(window, 'WebSocket', { configurable: true, value: FakeWebSocket });
+      window.__geminiMock = {
+        socket: null,
+        setup: null,
+        responses: [],
+        stoppedTracks: () => stoppedTracks,
+        emit: (message) => window.__geminiMock.socket?.onmessage?.({ data: JSON.stringify(message) }),
+      };
+    });
+
+    await app.click('[data-testid="nav-network"]');
+    await app.click('[data-testid="net-tab-agent"]');
+    await app.click('[data-testid="net-open-voice"]');
+    await app.click('.voice-start');
+    await app.waitForFunction(
+      () => document.querySelector('.voice-active-status')?.textContent?.includes('Te estoy escuchando'),
+      { timeout: 10000 },
+    );
+    await app.waitForSelector('[data-testid="voice-active-controls"]', { visible: true });
+    const emitVoiceTool = async (id, name, args = {}) => {
+      await app.evaluate(
+        ({ toolId, toolName, toolArgs }) =>
+          window.__geminiMock.emit({
+            toolCall: { functionCalls: [{ id: toolId, name: toolName, args: toolArgs }] },
+          }),
+        { toolId: id, toolName: name, toolArgs: args },
+      );
+      await app.waitForFunction(
+        (toolId) => window.__geminiMock.responses.some((response) => response.id === toolId),
+        { timeout: 10000 },
+        id,
+      );
+      return app.evaluate(
+        (toolId) => window.__geminiMock.responses.find((response) => response.id === toolId).response.result,
+        id,
+      );
+    };
+    await app.evaluate(() => window.__geminiMock.emit({
+      serverContent: { inputTranscription: { text: 'Quiero vender una mochila', finished: true } },
+    }));
+    const openedListingForm = await emitVoiceTool('voice-open-listing', 'open_listing_form');
+    assert.equal(openedListingForm.success, true);
+    assert.equal(openedListingForm.verified, true);
+    assert.equal(await app.$eval('[data-testid="app-screen"]', (element) => element.dataset.screen), 'community');
+    await app.waitForSelector('[data-testid="listing-title"]', { timeout: 5000 });
+    const activeControls = await app.$eval('[data-testid="voice-active-controls"]', (element) => ({
+      height: element.getBoundingClientRect().height,
+      cancelLabel: element.querySelector('.voice-close')?.getAttribute('aria-label'),
+    }));
+    assert.ok(activeControls.height < 100);
+    assert.equal(activeControls.cancelLabel, 'Cancelar llamada');
+    const formHitTarget = await app.$eval('[data-testid="listing-title"]', (element) => {
+      const bounds = element.getBoundingClientRect();
+      return document.elementFromPoint(bounds.left + bounds.width / 2, bounds.top + bounds.height / 2) === element;
+    });
+    assert.equal(formHitTarget, true);
+    const schema = await emitVoiceTool('voice-listing-schema', 'get_listing_form_schema');
+    assert.equal(schema.fields.title.required, true);
+    assert.equal(schema.fields.description.required, true);
+    assert.equal(schema.fields.photo.required, false);
+
+    await emitVoiceTool('voice-update-initial', 'update_listing_form_fields', {
+      title: 'Mochila tejida',
+      category: 'vestimenta',
+      price: 'S/ 50',
+    });
+    await app.waitForFunction(
+      () => document.querySelector('[data-testid="listing-title"]')?.value === 'Mochila tejida',
+    );
+    assert.equal(await app.$eval('[data-testid="listing-price"]', (element) => element.value), 'S/ 50');
+    const incomplete = await emitVoiceTool('voice-validate-incomplete', 'validate_listing_form');
+    assert.equal(incomplete.valid, false);
+    assert.deepEqual(incomplete.missingRequiredFields, ['location', 'description']);
+
+    const gpsResult = await emitVoiceTool('voice-use-gps', 'use_current_location');
+    assert.equal(gpsResult.success, true);
+    assert.ok(gpsResult.coordinates.accuracy >= 0);
+    await app.waitForFunction(
+      () => document.querySelector('[data-testid="listing-location"]')?.value.startsWith('GPS: '),
+    );
+    await emitVoiceTool('voice-update-description', 'update_listing_form_fields', {
+      description: 'Mochila tejida a mano',
+    });
+    const completeForm = await emitVoiceTool('voice-validate-complete', 'validate_listing_form');
+    assert.equal(completeForm.valid, true);
+
+    const publicationConfirmation = await emitVoiceTool(
+      'voice-prepare-publication',
+      'request_listing_publication_confirmation',
+    );
+    assert.equal(publicationConfirmation.success, true);
+    assert.ok(publicationConfirmation.summary.includes('Mochila tejida'));
+    assert.ok(publicationConfirmation.summary.includes('GPS exactas'));
+    await app.evaluate(() => window.__geminiMock.emit({
+      serverContent: { inputTranscription: { text: 'No, cancela', finished: true } },
+    }));
+    const rejectedPublication = await emitVoiceTool('voice-reject-publication', 'publish_listing', {
+      confirmationId: publicationConfirmation.confirmationId,
+    });
+    assert.equal(rejectedPublication.success, false);
+    const savedAfterReject = await app.evaluate(() => JSON.parse(localStorage.getItem('manguare.listings.v1') || '[]'));
+    assert.ok(!savedAfterReject.some((item) => item.title === 'Mochila tejida'));
+
+    await app.evaluate(() => window.__geminiMock.emit({
+      serverContent: { inputTranscription: { text: 'Sí, publica la mochila', finished: true } },
+    }));
+    const published = await emitVoiceTool('voice-confirm-publication', 'publish_listing', {
+      confirmationId: publicationConfirmation.confirmationId,
+    });
+    assert.equal(published.success, true);
+    await app.waitForFunction(
+      () => JSON.parse(localStorage.getItem('manguare.listings.v1') || '[]')
+        .some((item) => item.title === 'Mochila tejida'),
+      { timeout: 5000 },
+    );
+    const savedListing = await app.evaluate(() =>
+      JSON.parse(localStorage.getItem('manguare.listings.v1') || '[]')
+        .find((item) => item.title === 'Mochila tejida'),
+    );
+    assert.deepEqual(savedListing.coordinates, gpsResult.coordinates);
+    assert.equal(savedListing.priceRange, 'S/ 50');
+    assert.equal(savedListing.description, 'Mochila tejida a mano');
+    assert.ok(!savedListing.community.includes('Mi comunidad'));
+    results.voiceListingToolsAndExplicitConfirmation = true;
+
+    await app.click('.voice-close');
+    await app.click('[data-testid="listing-open-publish"]');
+    await app.click('[data-testid="listing-voice-assistant"]');
+    await app.click('.voice-start');
+    await app.waitForFunction(
+      () => document.querySelector('.voice-active-status')?.textContent?.includes('Te estoy escuchando'),
+      { timeout: 10000 },
+    );
+    await app.click('.voice-close');
+    assert.equal(await app.$eval('[data-testid="app-screen"]', (element) => element.dataset.screen), 'community');
+    await app.waitForSelector('[data-testid="listing-title"]', { timeout: 5000 });
+    const stoppedFromCommunity = await app.evaluate(() => window.__geminiMock.stoppedTracks());
+    assert.ok(stoppedFromCommunity >= 1);
+    results.voiceCancelKeepsCommunity = true;
+
+    await app.click('[aria-label="Cerrar"]');
+    await app.click('[data-testid="nav-network"]');
+    await app.click('[data-testid="net-tab-agent"]');
+    await app.click('[data-testid="net-open-voice"]');
+    await app.click('.voice-start');
+    await app.waitForFunction(
+      () => document.querySelector('.voice-active-status')?.textContent?.includes('Te estoy escuchando'),
+      { timeout: 10000 },
+    );
+    await app.click('.voice-close');
+    assert.equal(await app.$eval('[data-testid="app-screen"]', (element) => element.dataset.screen), 'network');
+    results.voiceCancelKeepsOtherScreen = true;
 
     // 9. Mapa: solo Conecta y centros de apoyo; ubica y enfoca resultados.
     await app.click('[data-testid="nav-map"]');

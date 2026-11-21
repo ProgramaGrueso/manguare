@@ -110,7 +110,7 @@ describe('match', () => {
 });
 
 describe('mercado', () => {
-  it('crea una publicación con valores por defecto y exige título', () => {
+  it('crea una publicación sin inventar precio, ubicación o coordenadas y exige título', () => {
     assert.equal(
       buildListing({ title: ' ', description: '', category: 'otros', priceRange: '', location: '', author: 'Juan' }),
       null,
@@ -123,9 +123,25 @@ describe('mercado', () => {
       location: '',
       author: 'Juan',
     })!;
-    assert.equal(listing.priceRange, 'A convenir');
-    assert.equal(listing.location, 'Mi comunidad');
+    assert.equal(listing.priceRange, '');
+    assert.equal(listing.location, '');
+    assert.equal(listing.description, '');
+    assert.equal(listing.coordinates, undefined);
     assert.equal(listing.reviews.length, 0);
+  });
+
+  it('conserva las coordenadas reales cuando el usuario las proporciona', () => {
+    const coordinates = { lat: -5.15, lng: -78.29 };
+    const listing = buildListing({
+      title: 'Mochila',
+      description: 'Hecha a mano',
+      category: 'vestimenta',
+      priceRange: 'S/ 50',
+      location: 'GPS: -5.15, -78.29',
+      author: 'Juan',
+      coordinates,
+    });
+    assert.deepEqual(listing?.coordinates, coordinates);
   });
 });
 

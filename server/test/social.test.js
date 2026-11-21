@@ -107,12 +107,34 @@ test('solo el autor borra su publicación', async () => {
 });
 
 test('el mercado guarda publicaciones propias con categoría válida', async () => {
-  const listing = { id: 'l-0000001', title: 'Miel pura', category: 'alimentos', priceRange: 'S/ 20', author: 'Juan', photo: JPEG };
+  const listing = {
+    id: 'l-0000001',
+    title: 'Mochila tejida',
+    category: 'vestimenta',
+    priceRange: 'S/ 50',
+    description: 'Mochila hecha a mano',
+    location: 'GPS: -5.15, -78.29',
+    community: 'Awajún',
+    coordinates: { lat: -5.15, lng: -78.29 },
+    author: 'Juan',
+    photo: JPEG,
+  };
   const created = await call('POST', '/api/social/listings', '992066275', listing);
   assert.equal(created.status, 201);
   assert.equal(created.json.listing.mine, true);
+  assert.deepEqual(created.json.listing.coordinates, listing.coordinates);
+  assert.equal(created.json.listing.location, listing.location);
+  assert.equal(created.json.listing.community, listing.community);
   assert.ok(!('ownerPhone' in created.json.listing));
   assert.equal((await call('POST', '/api/social/listings', '992066275', { ...listing, id: 'l-0000002', category: 'armas' })).status, 400);
+  assert.equal(
+    (await call('POST', '/api/social/listings', '992066275', {
+      ...listing,
+      id: 'l-0000003',
+      coordinates: { lat: 100, lng: -78 },
+    })).status,
+    400,
+  );
   const list = await call('GET', '/api/social/listings', '987654321');
   assert.equal(list.json.listings.find((item) => item.id === 'l-0000001').mine, false);
   assert.equal((await call('DELETE', '/api/social/listings/l-0000001', '987654321')).status, 403);

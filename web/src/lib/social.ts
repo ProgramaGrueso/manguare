@@ -530,6 +530,8 @@ export interface NewListingInput {
   priceRange: string;
   location: string;
   author: string;
+  community?: string;
+  coordinates?: { lat: number; lng: number; accuracy?: number };
   photo?: string;
 }
 
@@ -540,17 +542,17 @@ export function buildListing(input: NewListingInput): CommunityListing | null {
     id: newId('mine'),
     category: input.category,
     title,
-    description: input.description.trim().slice(0, 400) || 'Sin descripción.',
+    description: input.description.trim().slice(0, 400),
     photo: input.photo,
-    location: input.location.trim().slice(0, 80) || 'Mi comunidad',
+    location: input.location.trim().slice(0, 80),
     rating: 0,
-    priceRange: input.priceRange.trim().slice(0, 30) || 'A convenir',
+    priceRange: input.priceRange.trim().slice(0, 30),
     author: input.author,
-    department: 'Amazonas',
-    province: 'Bagua',
-    district: 'Imaza',
-    community: 'Mi comunidad',
-    coordinates: { lat: -5.15, lng: -78.29 },
+    department: '',
+    province: '',
+    district: '',
+    community: input.community?.trim() ?? '',
+    ...(input.coordinates ? { coordinates: input.coordinates } : {}),
     reviews: [],
     synced: false,
   };

@@ -51,7 +51,7 @@ const HTML_CSP = [
   "style-src 'self' 'unsafe-inline'",
   "img-src 'self' data: blob: https://*.tile.openstreetmap.org https://tile.openstreetmap.org",
   "media-src 'self' blob:",
-  "connect-src 'self'",
+  "connect-src 'self' https://generativelanguage.googleapis.com wss://generativelanguage.googleapis.com",
   "manifest-src 'self'",
   "worker-src 'self'",
   "font-src 'self'",
@@ -358,22 +358,47 @@ export function toSocialListing(input, phone, now) {
   if (!title) throw new HttpError(400, 'invalid_title');
   const category = readString(input.category, 20, 'category');
   if (!SOCIAL_CATEGORIES.has(category)) throw new HttpError(400, 'invalid_category');
+  const coordinates = input.coordinates;
+  let validCoordinates;
+  if (coordinates !== undefined) {
+    if (
+      !coordinates ||
+      typeof coordinates !== 'object' ||
+      !Number.isFinite(coordinates.lat) ||
+      coordinates.lat < -90 ||
+      coordinates.lat > 90 ||
+      !Number.isFinite(coordinates.lng) ||
+      coordinates.lng < -180 ||
+      coordinates.lng > 180 ||
+      (coordinates.accuracy !== undefined &&
+        (!Number.isFinite(coordinates.accuracy) ||
+          coordinates.accuracy < 0 ||
+          coordinates.accuracy > 100_000))
+    ) {
+      throw new HttpError(400, 'invalid_coordinates');
+    }
+    validCoordinates = {
+      lat: coordinates.lat,
+      lng: coordinates.lng,
+      ...(coordinates.accuracy !== undefined ? { accuracy: coordinates.accuracy } : {}),
+    };
+  }
   return {
     id: readSocialId(input.id),
     ownerPhone: phone,
     category,
     title,
-    description: readString(input.description, 400, 'description') || 'Sin descripción.',
+    description: readString(input.description, 400, 'description'),
     photo: readSocialPhoto(input.photo),
-    location: readString(input.location, 80, 'location') || 'Mi comunidad',
+    location: readString(input.location, 80, 'location'),
     rating: 0,
-    priceRange: readString(input.priceRange, 30, 'priceRange') || 'A convenir',
+    priceRange: readString(input.priceRange, 30, 'priceRange'),
     author: readString(input.author, 60, 'author') || 'Anónimo',
-    department: 'Amazonas',
-    province: 'Bagua',
-    district: 'Imaza',
-    community: 'Mi comunidad',
-    coordinates: { lat: -5.15, lng: -78.29 },
+    department: readString(input.department, 80, 'department'),
+    province: readString(input.province, 80, 'province'),
+    district: readString(input.district, 80, 'district'),
+    community: readString(input.community, 80, 'community'),
+    ...(validCoordinates ? { coordinates: validCoordinates } : {}),
     reviews: [],
     createdAt: now(),
   };
@@ -388,10 +413,12 @@ export function createHandler({
   auth = null,
   ackMinutes = DEFAULT_ACK_MINUTES,
   escalationPhone = '',
+  geminiApiKey = process.env.GEMINI_API_KEY ?? '',
 }) {
   const alertLimiter = createRateLimiter({ windowMs: 10 * 60 * 1000, max: 120 });
   const socialLimiter = createRateLimiter({ windowMs: 10 * 60 * 1000, max: 240 });
   const loginLimiter = createRateLimiter({ windowMs: 15 * 60 * 1000, max: 8 });
+  const geminiLimiter = createRateLimiter({ windowMs: 60 * 1000, max: 10 });
   const effectiveAckMinutes =
     Number.isFinite(ackMinutes) && ackMinutes >= 0 ? ackMinutes : DEFAULT_ACK_MINUTES;
 
@@ -434,6 +461,73 @@ export function createHandler({
         });
         return;
       }
+
+      if (pathname === '/api/gemini/token') {
+          if (req.method !== 'POST') {
+            sendJson(res, 405, { error: 'method_not_allowed' });
+            return;
+          }
+
+          if (!geminiApiKey) {
+            sendJson(res, 503, { error: 'gemini_not_configured' });
+            return;
+          }
+
+          if (!geminiApiKey || geminiApiKey.length < 20) {
+            sendJson(res, 503, { error: 'gemini_api_key_format_invalid' });
+          return;
+          }
+
+          const limit = geminiLimiter(`gemini:${clientIp(req)}`);
+          if (!limit.allowed) {
+            sendJson(res, 429, { error: 'rate_limit_exceeded' });
+            return;
+          }
+
+          const nowMs = Date.now();
+          const googleResponse = await fetch(
+            'https://generativelanguage.googleapis.com/v1beta/auth_tokens',
+            {
+              method: 'POST',
+              headers: {
+                'Content-Type': 'application/json',
+                'x-goog-api-key': geminiApiKey,
+              },
+              body: JSON.stringify({
+                uses: 1,
+                expireTime: new Date(nowMs + 30 * 60 * 1000).toISOString(),
+                newSessionExpireTime: new Date(nowMs + 60 * 1000).toISOString(),
+              }),
+            },
+          );
+
+          const result = await googleResponse.json().catch(() => ({}));
+
+          if (!googleResponse.ok || !result.name) {
+            const googleError =
+              result?.error?.message ||
+              result?.error ||
+              'respuesta sin detalles';
+            console.error(
+              '[manguare] Gemini token error:',
+              googleResponse.status,
+              typeof googleError === 'string'
+                ? googleError.slice(0, 500)
+                : JSON.stringify(googleError).slice(0, 500),
+            );
+            sendJson(res, 502, {
+              error: 'gemini_token_unavailable',
+              providerStatus: googleResponse.status,
+            });
+            return;
+          }
+
+          sendJson(res, 200, {
+            token: result.name,
+            model: 'gemini-3.8-live',
+          });
+          return;
+        }
 
       if (pathname === '/api/panel/session') {
         if (req.method !== 'GET') {

@@ -19,9 +19,10 @@ jobs:
       - run: npm ci
       - run: npm run check
 
-  e2e:
+    e2e:
     name: Recorrido offline → enviada → recibida
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     needs: checks
     steps:
       - uses: actions/checkout@v4
@@ -32,8 +33,15 @@ jobs:
       - run: npm ci
       - name: Instalar Chrome para Puppeteer
         run: |
-          CHROME_PATH=$(npx @puppeteer/browsers install chrome@stable --path .chrome | tail -n 1)
+          npx @puppeteer/browsers install chrome@stable --path "$RUNNER_TEMP/puppeteer"
+          CHROME_PATH=$(find "$RUNNER_TEMP/puppeteer" -type f -name chrome -executable -print -quit)
+          if [ -z "$CHROME_PATH" ]; then
+            echo "No se encontró el ejecutable de Chrome"
+            exit 1
+          fi
           echo "CHROME_PATH=$CHROME_PATH" >> "$GITHUB_ENV"
+          echo "Chrome instalado en: $CHROME_PATH"
+          "$CHROME_PATH" --version
       - run: npm run build
       - run: npm run test:e2e
 

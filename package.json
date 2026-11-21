@@ -9,11 +9,11 @@
   },
   "scripts": {
     "dev": "concurrently -k -n api,web -c green,cyan \"npm:dev:api\" \"npm:dev:web\"",
-    "dev:api": "node --watch server/src/index.js",
+    "dev:api": "node --env-file-if-exists=.env --watch server/src/index.js",
     "dev:web": "vite --config web/vite.config.ts",
     "build": "vite build --config web/vite.config.ts",
     "build:beta": "vite build --config web/vite.config.ts --mode beta-visual",
-    "start": "node server/src/index.js",
+    "start": "node --env-file-if-exists=.env server/src/index.js",
     "seed": "node server/scripts/seed.js",
     "test": "npm run test:api && npm run test:web",
     "test:api": "node --test server/test/*.test.js",

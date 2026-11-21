@@ -17,6 +17,8 @@ services:
       # Actívalos si publicas detrás de HTTPS y un proxy inverso.
       MANGUARE_SECURE_COOKIES: ${MANGUARE_SECURE_COOKIES:-0}
       MANGUARE_TRUST_PROXY: ${MANGUARE_TRUST_PROXY:-0}
+      #permitirá que la integración también funcione cuando ejecutes Manguaré con Docker
+      GEMINI_API_KEY: ${GEMINI_API_KEY:-}
     volumes:
       - manguare-data:/data
     restart: unless-stopped

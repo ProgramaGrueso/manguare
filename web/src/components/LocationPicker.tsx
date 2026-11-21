@@ -6,6 +6,7 @@ import { useEffect, useState } from 'react';
 import { CircleMarker, MapContainer, TileLayer, useMap, useMapEvents } from 'react-leaflet';
 import type { LeafletMouseEvent } from 'leaflet';
 import { useApp } from '../app/AppContext';
+import { getCurrentLocation } from '../lib/geography';
 import type { AlertLocation } from '../lib/types';
 import 'leaflet/dist/leaflet.css';
 
@@ -38,28 +39,18 @@ export function LocationPicker({
   const center: [number, number] = value ? [value.lat, value.lng] : AMAZONAS_CENTER;
 
   const activateLocation = () => {
-    if (!navigator.geolocation) {
-      setError(t('locationPicker.esteNavegadorNoOfreceGeolocalizacion'));
-      return;
-    }
     setLocating(true);
     setError('');
-    navigator.geolocation.getCurrentPosition(
-      (position) => {
-        onChange({
-          lat: Number(position.coords.latitude.toFixed(6)),
-          lng: Number(position.coords.longitude.toFixed(6)),
-          accuracy: Math.round(position.coords.accuracy),
-          capturedAt: new Date(position.timestamp).toISOString(),
-        });
-        setLocating(false);
-      },
-      () => {
-        setError(t('locationPicker.noSePudoObtenerElGps'));
-        setLocating(false);
-      },
-      { enableHighAccuracy: true, timeout: 12_000, maximumAge: 60_000 },
-    );
+    void getCurrentLocation()
+      .then(onChange)
+      .catch((reason: unknown) => {
+        setError(
+          reason instanceof Error
+            ? reason.message
+            : t('locationPicker.noSePudoObtenerElGps'),
+        );
+      })
+      .finally(() => setLocating(false));
   };
 
   return (

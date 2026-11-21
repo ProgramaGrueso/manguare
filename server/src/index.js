@@ -40,8 +40,18 @@ const auth = createAuth({
     (Number.isFinite(sessionHours) && sessionHours > 0 ? sessionHours : 12) * 60 * 60 * 1000,
   secureCookies: process.env.MANGUARE_SECURE_COOKIES === '1',
 });
+console.log('Gemini API Key cargada:', Boolean(process.env.GEMINI_API_KEY));
 const server = http.createServer(
-  createHandler({ store, biodiversityStore, socialStore, staticDir, auth, ackMinutes, escalationPhone }),
+  createHandler({
+  store,
+  biodiversityStore,
+  socialStore,
+  staticDir,
+  auth,
+  ackMinutes,
+  escalationPhone,
+  geminiApiKey: process.env.GEMINI_API_KEY ?? '',
+}),
 );
 
 function lanAddresses() {

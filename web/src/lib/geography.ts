@@ -1,3 +1,5 @@
+import type { AlertLocation } from './types';
+
 export interface ProvinceOption {
   name: string;
   districts: string[];
@@ -108,4 +110,33 @@ export function correctedCommunityName(value: string): string {
     (community) => community.toLocaleLowerCase('es') === normalized,
   );
   return match ?? value.trim();
+}
+
+export function getCurrentLocation(): Promise<AlertLocation> {
+  if (typeof navigator === 'undefined' || !navigator.geolocation) {
+    return Promise.reject(new Error('Este navegador no ofrece geolocalización.'));
+  }
+
+  return new Promise((resolve, reject) => {
+    navigator.geolocation.getCurrentPosition(
+      (position) => {
+        resolve({
+          lat: Number(position.coords.latitude.toFixed(6)),
+          lng: Number(position.coords.longitude.toFixed(6)),
+          accuracy: Math.round(position.coords.accuracy),
+          capturedAt: new Date(position.timestamp).toISOString(),
+        });
+      },
+      (error) => {
+        const message =
+          error.code === error.PERMISSION_DENIED
+            ? 'Se denegó el permiso de ubicación. Permite el GPS en el navegador o indica una ubicación escrita.'
+            : error.code === error.POSITION_UNAVAILABLE
+              ? 'El dispositivo no pudo determinar la ubicación. Indica una ubicación escrita.'
+              : 'La búsqueda de ubicación agotó el tiempo. Intenta de nuevo o indica una ubicación escrita.';
+        reject(new Error(message));
+      },
+      { enableHighAccuracy: true, timeout: 12_000, maximumAge: 60_000 },
+    );
+  });
 }

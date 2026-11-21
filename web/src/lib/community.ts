@@ -29,7 +29,7 @@ export interface CommunityListing {
   province: string;
   district: string;
   community: string;
-  coordinates: { lat: number; lng: number };
+  coordinates?: { lat: number; lng: number; accuracy?: number };
   reviews: Array<{ name: string; date: string; rating: number; comment: string }>;
   /** Solo publicaciones propias: false = aún no llegó al servidor. */
   synced?: boolean;

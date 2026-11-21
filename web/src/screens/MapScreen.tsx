@@ -32,7 +32,10 @@ interface MapResult {
 }
 
 const RESULTS: MapResult[] = [
-  ...COMMUNITY_LISTINGS.map((listing) => ({
+  ...COMMUNITY_LISTINGS.filter(
+    (listing): listing is typeof listing & { coordinates: { lat: number; lng: number } } =>
+      Boolean(listing.coordinates),
+  ).map((listing) => ({
     id: listing.id,
     kind: 'conecta' as const,
     name: listing.title,
